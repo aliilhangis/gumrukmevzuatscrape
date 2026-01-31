@@ -22,21 +22,30 @@ BUCKET_NAME = os.environ.get("BUCKET_NAME", "gumruk-files")
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "2"))
-START_FROM = int(os.environ.get("START_FROM", "1"))
-END_AT = int(os.environ.get("END_AT", "3268"))
 
-# Base URL
-BASE_URL = "https://gumruk.com.tr/files/"
+# ============================================================================
+# BURAYA LİNKLERİNİZİ EKLEYİN (virgül ile ayrılmış)
+# ============================================================================
+FILE_URLS = [
+    "https://gumruk.com.tr/files/tutun_mamulleri_ve_alkollu_ickilerde_bandrol_denetimi_seri_no_01.htm",
+    # Diğer linkleri buraya ekleyin, her satır virgül ile bitmeli:
+    # "https://gumruk.com.tr/files/tutun_mamulleri_ve_alkollu_ickilerde_bandrol_denetimi_seri_no_02.htm",
+    # "https://gumruk.com.tr/files/tutun_mamulleri_ve_alkollu_ickilerde_bandrol_denetimi_seri_no_03.htm",
+]
+# ============================================================================
 
 # Supabase client oluştur
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def download_file(file_number: int, retry_count: int = 0) -> Tuple[str, Optional[bytes], Optional[str]]:
+def get_filename_from_url(url: str) -> str:
+    """URL'den dosya adını çıkar"""
+    return url.split('/')[-1]
+
+def download_file(url: str, retry_count: int = 0) -> Tuple[str, Optional[bytes], Optional[str]]:
     """
-    Belirtilen numaradaki dosyayı indir, gerekirse retry yap
+    Belirtilen URL'deki dosyayı indir, gerekirse retry yap
     """
-    file_name = f"tutun_mamulleri_ve_alkollu_ickilerde_bandrol_denetimi_seri_no_{file_number:02d}.htm"
-    url = BASE_URL + file_name
+    file_name = get_filename_from_url(url)
     
     try:
         response = requests.get(url, timeout=30)
@@ -52,7 +61,7 @@ def download_file(file_number: int, retry_count: int = 0) -> Tuple[str, Optional
         if retry_count < MAX_RETRIES:
             logger.warning(f"İndirme hatası (deneme {retry_count + 1}/{MAX_RETRIES}): {file_name} - {str(e)}")
             time.sleep(RETRY_DELAY * (retry_count + 1))
-            return download_file(file_number, retry_count + 1)
+            return download_file(url, retry_count + 1)
         else:
             return (file_name, None, f"Download failed after {MAX_RETRIES} retries: {str(e)}")
 
@@ -95,18 +104,19 @@ def upload_to_supabase(file_name: str, content: bytes, retry_count: int = 0) -> 
         else:
             return (file_name, False, f"Upload failed after {MAX_RETRIES} retries: {str(e)}")
 
-def process_file(file_number: int) -> Dict:
+def process_file(url: str) -> Dict:
     """
     Dosyayı indir ve Supabase'e yükle
     """
     start_time = time.time()
+    file_name = get_filename_from_url(url)
     
     # Dosyayı indir
-    file_name, content, download_error = download_file(file_number)
+    _, content, download_error = download_file(url)
     
     if download_error:
         return {
-            "file_number": file_number,
+            "url": url,
             "file_name": file_name,
             "success": False,
             "error": download_error,
@@ -118,7 +128,7 @@ def process_file(file_number: int) -> Dict:
     
     if upload_error:
         return {
-            "file_number": file_number,
+            "url": url,
             "file_name": file_name,
             "success": False,
             "error": upload_error,
@@ -126,7 +136,7 @@ def process_file(file_number: int) -> Dict:
         }
     
     return {
-        "file_number": file_number,
+        "url": url,
         "file_name": file_name,
         "success": True,
         "error": None,
@@ -138,13 +148,19 @@ def main():
     """
     Ana fonksiyon - dosyaları paralel olarak işle
     """
+    # URL listesini temizle (boş satırları kaldır)
+    clean_urls = [url.strip() for url in FILE_URLS if url.strip()]
+    
+    if not clean_urls:
+        logger.error("HATA: Hiç URL bulunamadı! FILE_URLS listesine linkleri ekleyin.")
+        exit(1)
+    
     logger.info("="*60)
     logger.info("GUMRUK DOSYALARI SUPABASE YÜKLEME İŞLEMİ")
     logger.info("="*60)
     logger.info(f"Supabase URL: {SUPABASE_URL}")
     logger.info(f"Bucket: {BUCKET_NAME}")
-    logger.info(f"Dosya aralığı: {START_FROM} - {END_AT}")
-    logger.info(f"Toplam dosya: {END_AT - START_FROM + 1}")
+    logger.info(f"Toplam dosya: {len(clean_urls)}")
     logger.info(f"Paralel işlem sayısı: {MAX_WORKERS}")
     logger.info(f"Maksimum retry: {MAX_RETRIES}")
     logger.info("="*60)
@@ -163,14 +179,14 @@ def main():
     
     # ThreadPoolExecutor ile paralel işlem
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Tüm dosyaları işleme kuyruğuna ekle
-        future_to_file = {
-            executor.submit(process_file, i): i 
-            for i in range(START_FROM, END_AT + 1)
+        # Tüm URL'leri işleme kuyruğuna ekle
+        future_to_url = {
+            executor.submit(process_file, url): url 
+            for url in clean_urls
         }
         
         # İşlemleri tamamlandıkça kontrol et
-        for future in as_completed(future_to_file):
+        for future in as_completed(future_to_url):
             result = future.result()
             stats["total"] += 1
             
@@ -179,14 +195,14 @@ def main():
                 stats["total_size"] += result.get("size", 0)
                 stats["total_duration"] += result["duration"]
                 logger.info(
-                    f"[{stats['total']}/{END_AT - START_FROM + 1}] ✓ {result['file_name']} "
+                    f"[{stats['total']}/{len(clean_urls)}] ✓ {result['file_name']} "
                     f"({result.get('size', 0)/1024:.1f} KB, {result['duration']:.2f}s)"
                 )
             else:
                 stats["failed"] += 1
                 failed_uploads.append(result)
                 logger.error(
-                    f"[{stats['total']}/{END_AT - START_FROM + 1}] ✗ {result['file_name']}: "
+                    f"[{stats['total']}/{len(clean_urls)}] ✗ {result['file_name']}: "
                     f"{result['error']}"
                 )
             
@@ -194,11 +210,11 @@ def main():
             if stats["total"] % 100 == 0:
                 elapsed = time.time() - start_time
                 avg_time = elapsed / stats["total"]
-                remaining = (END_AT - START_FROM + 1 - stats["total"]) * avg_time
+                remaining = (len(clean_urls) - stats["total"]) * avg_time
                 
                 logger.info("")
                 logger.info("--- İLERLEME ÖZETİ ---")
-                logger.info(f"Tamamlanan: {stats['total']}/{END_AT - START_FROM + 1}")
+                logger.info(f"Tamamlanan: {stats['total']}/{len(clean_urls)}")
                 logger.info(f"Başarılı: {stats['successful']} ({stats['successful']/stats['total']*100:.1f}%)")
                 logger.info(f"Başarısız: {stats['failed']} ({stats['failed']/stats['total']*100:.1f}%)")
                 logger.info(f"Toplam boyut: {stats['total_size']/1024/1024:.2f} MB")
@@ -232,9 +248,9 @@ def main():
         
         # Başarısız dosyaları log dosyasına yaz
         with open("failed_uploads.log", "w", encoding="utf-8") as f:
-            f.write("file_number,file_name,error\n")
+            f.write("url,file_name,error\n")
             for failed in failed_uploads:
-                f.write(f"{failed['file_number']},{failed['file_name']},\"{failed['error']}\"\n")
+                f.write(f"{failed['url']},{failed['file_name']},\"{failed['error']}\"\n")
         logger.info("\nBaşarısız yüklemeler 'failed_uploads.log' dosyasına kaydedildi.")
 
 if __name__ == "__main__":
