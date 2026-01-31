@@ -267,3 +267,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Beklenmeyen hata: {str(e)}", exc_info=True)
         exit(1)
+
+    # İşlem bitti ama Railway container'ı kapatmasın
+    logger.info("İşlem tamamlandı. Container açık kalıyor...")
+    while True:
+        time.sleep(3600)
