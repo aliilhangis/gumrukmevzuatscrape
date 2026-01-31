@@ -1,1 +1,1 @@
-worker: upload_with_manual_links.py
+worker: python upload_with_manual_links.py
