@@ -1,1 +1,1 @@
-worker: python upload_to_supabase.py
+worker: upload_with_manual_links.py
